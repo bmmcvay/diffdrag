@@ -6,8 +6,8 @@
 % Experiments will be run at 50 km, 100 km, 150 km, 200 km, and so on until
 % we hit 550 km. Maybe try for 580, idk.
 %
-% Everything you actually need to edit is in the "variables" section,
-% hopefully.
+% Everything you actually need to edit is in the "variables" section.
+% Hopefully.
 %
 % Disclaimer: I'm a terrible coder and I know it, so can it, okay?
 % As long as it works...
@@ -26,9 +26,9 @@ startPosition.vC = 332.2;    % True anomaly (degrees) (CLICK-C)
 %Masses of satellite
 dryMass = 6; %kg
 fuelMass = 0; %kg
-sphericalArea=0.02; %m^2 @@
-% Dimensions of satellite
-Lx=0.34; %m
+sphericalArea=0.06; %m^2 @@
+% Dimensions of satellite (not counting solar panels)
+Lx=0.3405378; %m
 Ly=0.1; %m
 Lz=0.1; %m
 % Coordinates of ground stations
@@ -36,15 +36,17 @@ coords_awarua=[-46.5045 168.373]; %deg, formatted [lat,lon]
 coords_puertollano=[38.6741 -4.16201];
 coords_puntaarenas=[-52.9328 -70.8502];
 % Start time & duration
-currentTime = 1704067300; %Jan 1 2024 + 100 seconds
-scenario_time_length = 3; %weeks
+currentTime = 1767225600; %Jan 1 2026
+scenario_time_length = 6; %weeks
 % Attitude & targetting times
 deploymentTime=17280; %time spent in deployment phase, in seconds. Usually 2 weeks
 targettingDuration=1800; %time spent targetting the other satellite for the experiment, in seconds. Usually 30 min
 slewTime=90; %time spent slewing. avg rate is ~1 deg/sec, so I have it as 90 sec here.
 slewRate=3; %max slew rate, deg/sec
-periodHigh=200000; %time spent in the high drag configuration, in seconds
-periodWait=150000; %time CLICK-C will spent waiting after B enters high drag to enter high drag itself, in seconds
+% For MO1, use 42105 and 34211
+% For MO2, use 160000 and 130000
+periodHigh=42105; %time spent in the high drag configuration, in seconds
+periodWait=34211; %time CLICK-C will spent waiting after B enters high drag to enter high drag itself, in seconds
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Open stk and initialize
@@ -123,7 +125,7 @@ driverB = CLICKB.Propagator;
 mcsB = driverB.MainSequence;
 mcsB.RemoveAll;  % Clear default segments
 
-% Insert Initial State segment using VAdriverB @@?
+% Insert Initial State segment using driverB
 initStateB = driverB.MainSequence.Insert('eVASegmentTypeInitialState', 'InitialState', '-');
 %Define other conditions
 initStateB.SpacecraftParameters.DryMass = dryMass+fuelMass;
@@ -172,7 +174,7 @@ driverC = CLICKC.Propagator;
 mcsC = driverC.MainSequence;
 mcsC.RemoveAll;  % Clear default segments
 
-% Insert Initial State segment using VAdriverC @@?
+% Insert Initial State segment using driverC
 initStateC = driverC.MainSequence.Insert('eVASegmentTypeInitialState', 'InitialState', '-');
 
 %Define other conditions
@@ -213,6 +215,7 @@ moiC.Izz=dryMass/12*(Lx^2+Ly^2); %kgm^2
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Duplicate CLICK-C so that the targetting sequence doesn't have circular logic
+
 CLICKCtargetobject = scenario.Children.CopyObject(CLICKC, 'CLICK-Ctargetobject');
 driverCto = CLICKCtargetobject.Propagator;
 
@@ -226,181 +229,46 @@ driverCto.RunMCS;
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Find eclipse intervals
 
-sat = root.GetObjectFromPath('Satellite/CLICK-B');
-
-% Access the Eclipse Times data provider
-eclipseDP = sat.DataProviders.Item('Eclipse Times');
-
-% Execute over scenario duration (Interval data provider type)
-result = eclipseDP.Exec(scenario.StartTime, scenario.StopTime);
-
-% Extract start and stop time datasets
-startTimes = result.DataSets.GetDataSetByName('Start Time').GetValues;
-stopTimes  = result.DataSets.GetDataSetByName('Stop Time').GetValues;
-
-% Delete weird bugged duplicate dates. This is very ungraceful but shhh
-k=1;
-for i=1:length(startTimes)
-    for j=1:length(stopTimes)
-        if isequal(startTimes{i},stopTimes{j})
-            badstartindex(k,1)=i;
-            badstopindex(k,1)=j;
-            k=k+1;
-        end
-    end
-end
-for i=1:length(badstartindex)
-    badstartTimes{i,1}=startTimes{badstartindex(i)};
-    badstopTimes{i,1}=stopTimes{badstopindex(i)};
-end
-startTimes=setdiff(startTimes,badstartTimes,'stable');
-stopTimes=setdiff(stopTimes,badstopTimes,'stable');
-
-% Cut off all eclipse intervals from before when ops can start
-endofdeployment=root.ConversionUtility.ConvertDate('EpSec','UTCG',num2str(deploymentTime)); %UTC time that satellite is ready to start operations
-maneuverStartindex=datetime(startTimes,'InputFormat','dd MMM yyyy HH:mm:ss.SSS')>=datetime(endofdeployment,'InputFormat','dd MMM yyyy HH:mm:ss.SSS');
-maneuverStopindex=datetime(stopTimes,'InputFormat','dd MMM yyyy HH:mm:ss.SSS')>=datetime(endofdeployment,'InputFormat','dd MMM yyyy HH:mm:ss.SSS');
-startTimes=startTimes(maneuverStartindex);
-stopTimes=stopTimes(maneuverStopindex);
-firstStopindex=datetime(stopTimes,'InputFormat','dd MMM yyyy HH:mm:ss.SSS')>=datetime(startTimes{1},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'); %make sure the first stop time isn't before the first start time
-stopTimes=stopTimes(firstStopindex);
+[startTimes, stopTimes,endofdeployment]=findEclipseIntervals(root,scenario,deploymentTime);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Attitude configuration
-% AKA If statement hell. i'm so sorry
+%% Initial attitude configuration
 
 % This will need to be done for both sats (and targetobject)
 satName='CLICK-B';
 followersatName='CLICK-C';
 dupesatName='CLICK-Ctargetobject'; %this one legit just copies everything C does except the pointing
 
-% Set the initial deployment status
+% Set the initial deployment status (tumbling)
 deploymentB=append('SetAttitude */Satellite/', satName,' Profile SpinSun 0.0 0.0 "',startDateStr,'"');
 root.ExecuteCommand(deploymentB);
 deploymentCto=append('SetAttitude */Satellite/', dupesatName,' Profile SpinSun 0.0 0.0 "',startDateStr,'"');
 root.ExecuteCommand(deploymentCto);
 deploymentC=append('SetAttitude */Satellite/', followersatName,' Profile SpinSun 0.0 0.0 "',startDateStr,'"');
-root.ExecuteCommand(deploymentC); %ideally this would be tumbling, but start in low drag for deployment. @@make this spinning abt sun vector instead
+root.ExecuteCommand(deploymentC); %ideally this would be tumbling, but start in sun pointing for deployment
 
-totalHighTime=0;
-totalLowTime=0;
-totalHighTimeC=0;
-totalPointingTime=0;
-for i=1:length(startTimes)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Maneuver Option 1:
+% Maintain sun pointing only when s/c is in sunlight. In eclipse, s/c
+% maneuvers to high drag configuration.
+maneuver1(root,startTimes,stopTimes,periodHigh,periodWait,satName,followersatName,dupesatName,slewTime,slewRate,startDateStr,stopDateStr);
 
-    % Get the dates/times to maneuver during the eclipse interval
-    time_slewout=startTimes{i};
-    time_out=datestr(datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')+seconds(slewTime));
-    time_slewin=datestr(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-seconds(slewTime));
-    time_in=stopTimes{i};
-    
-    % Now, maneuver using those times
-    if totalHighTime<periodHigh
-
-        %if LEADER hasn't been in high drag for long enough, maneuver to high drag
-        highDragManeuver(root,satName,time_slewout,time_out,time_slewin,time_in);
-
-        %...while FOLLOWER maneuvers based on wait time
-        if (totalHighTime+totalLowTime)>=periodWait
-
-            %after the wait period, FOLLOWER starts maneuvering
-            if totalHighTimeC<periodHigh
-                %if FOLLOWER hasn't been in high drag for long enough, maneuver to high drag
-                highDragManeuver(root,followersatName,time_slewout,time_out,time_slewin,time_in,startDateStr,stopDateStr);
-                highDragManeuver(root,dupesatName,time_slewout,time_out,time_slewin,time_in,startDateStr,stopDateStr); %TO
-                totalHighTimeC=totalHighTimeC+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-            else
-                %if FOLLOWER's finished with high drag, run the experiment and reset all high/low time counters
-                experimentManeuver(root,satName,dupesatName,time_out,time_slewin,slewTime,slewRate,startDateStr,stopDateStr);
-                experimentManeuver(root,followersatName,satName,time_out,time_slewin,slewTime,slewRate,startDateStr,stopDateStr);
-                totalPointingTime=totalPointingTime+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-                totalHighTime=0;
-                totalLowTime=0;
-                totalHighTimeC=0;
-            end
-        else
-            %if still in wait period, FOLLOWER maneuvers to low drag
-            lowDragManeuver(root,followersatName,time_slewout,time_out,time_slewin,time_in);
-        end
-
-        %update LEADER's high drag time
-        totalHighTime=totalHighTime+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-    
-    else
-        %if LEADER's finished with high drag, maneuver to low drag
-        lowDragManeuver(root,satName,time_slewout,time_out,time_slewin,time_in);
-        
-        %FOLLOWER maneuvers in low drag
-        if (totalHighTime+totalLowTime)>=periodWait
-            %after the wait period, FOLLOWER starts maneuvering
-            if totalHighTimeC<periodHigh
-                %if FOLLOWER hasn't been in high drag for long enough, maneuver to high drag
-                highDragManeuver(root,followersatName,time_slewout,time_out,time_slewin,time_in);
-                highDragManeuver(root,dupesatName,time_slewout,time_out,time_slewin,time_in); %TO
-                totalHighTimeC=totalHighTimeC+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-            else
-                %if FOLLOWER's finished with high drag, run the experiment and reset all high/low time counters
-                experimentManeuver(root,satName,dupesatName,time_out,time_slewin,slewTime,slewRate);
-                experimentManeuver(root,followersatName,satName,time_out,time_slewin,slewTime,slewRate);
-                totalPointingTime=totalPointingTime+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-                totalHighTime=0;
-                totalLowTime=0;
-                totalHighTimeC=0;
-            end
-        else
-            %if still in wait period, FOLLOWER maneuvers to low drag
-            lowDragManeuver(root,followersatName,time_slewout,time_out,time_slewin,time_in);
-            lowDragManeuver(root,dupesatName,time_slewout,time_out,time_slewin,time_in);
-        end
-
-        %update LEADER's low drag time
-        totalLowTime=totalLowTime+seconds(datetime(stopTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS')-datetime(startTimes{i},'InputFormat','dd MMM yyyy HH:mm:ss.SSS'))-1;
-    end
-end
-
-
-% date_slewtohigh1=root.ConversionUtility.ConvertDate('EpSec','UTCG',num2str(deploymentTime));
-% date_high1=root.ConversionUtility.ConvertDate('EpSec','UTCG',num2str(deploymentTime+slewTime));
-% date_slewtolow1=root.ConversionUtility.ConvertDate('EpSec','UTCG',num2str(deploymentTime+slewTime+highTime));
-% date_low1=root.ConversionUtility.ConvertDate('EpSec','UTCG',num2str(deploymentTime+2*slewTime+highTime));
-
-% satName='CLICK-B'; 
-% deployment=append('SetAttitude */Satellite/', satName,' Profile Fixed YPR 0 0 0 YPR "Satellite/CLICK-B ICR"');
-% root.ExecuteCommand(deployment); %ideally this would be tumbling, but start in low drag for deployment. maybe make this spinning instead?
-% slewtohigh1 = append('AddAttitude */Satellite/', satName,' Profile "',date_slewtohigh1,'" FixedTimeSlew Smooth On "');
-% root.ExecuteCommand(slewtohigh1);
-% high1=strcat('AddAttitude */Satellite/', satName,' Profile "',date_high1,'" Fixed YPR 90 0 0 YPR "Satellite/CLICK-B ICR"');
-% root.ExecuteCommand(high1);
-% slewtolow1=append('AddAttitude */Satellite/', satName,' Profile "',date_slewtolow1,'" FixedTimeSlew Smooth On "');
-% root.ExecuteCommand(slewtolow1);
-% low1=append('AddAttitude */Satellite/', satName,' Profile "',date_low1,'" Fixed YPR 0 0 0 YPR "Satellite/CLICK-B ICR"');
-% root.ExecuteCommand(low1);
-
-
-
-
-
-% IAgSatellite satellite: Satellite object
-% attitudePointing = CLICKB.Attitude.Pointing;
-% attitudePointing.UseTargetPointing = 1;
-% attitudePointing.Targets.RemoveAll;
-% attitudePointing.Targets.Add('Satellite/CLICK-C');
-% attitudePointing.TargetTimes.ScheduleTimes(start1Str,stop1Str);
-
-% root.ExecuteCommand('SetAttitude */Satellite/CLICK-B Profile InertFix Euler 10.0 20.0 30.0 321')
-% root.ExecuteCommand('AddAttitude */Satellite/CLICK-B Profile "14 May 2019 20:00:00.000" FixedTimeSlew Smooth On')
-% root.ExecuteCommand('AddAttitude */Satellite/CLICK-B Profile "14 May 2019 21:00:00.000" SunNadir 0')
-% root.ExecuteCommand('SetAttitude */Satellite/CLICK-B Target ADD Satellite/CLICK-C')
-
-% attitudeSlewing = satellite.Attitude.Pointing.TargetSlew;
-% attitudeSlewing.SetSlewModeType('eVeSlewModeConstrained2ndOrderSpline');
-% 
-% constrainedSlew = attitudeSlewing.SlewMode;
-% constrainedSlew.MaximumSlewTime = 20; % sec
-% constrainedSlew.SlewTimingBetweenTargets = 'eVeSlewTimingBetweenTargetsOptimal';
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Maneuver Option 2:
+% Maintain sun pointing at all times, rotating the s/c body around solar
+% panel normal to create high/low drag configurations
+% maneuver2(root,satName,followersatName,dupesatName,deploymentTime,endofdeployment,periodHigh,periodWait,startDateStr,stopDateStr,slewTime,slewRate,targettingDuration);
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% RUN THAT HOE
 driverB.RunMCS;
 driverC.RunMCS;
+driverCto.RunMCS;
 beep % So you can multitask while it's running!
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Rerun eclipse interval calcs now that we have preliminary maneuver plan
+% [startTimes, stopTimes]=findEclipseIntervals(root,scenario,deploymentTime);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% ...and recalculate the maneuvers. Shouldn't change much
